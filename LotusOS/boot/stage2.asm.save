@@ -1,0 +1,136 @@
+; stage2.asm - second stage loader (loaded at 0000:8000)
+; Enables A20, loads kernel to 0x00100000, enters 32-bit protected mode, jumps to kernel.
+
+bits 16
+org 0x8000
+
+%ifndef STAGE2_SECTORS
+%define STAGE2_SECTORS 32
+%endif
+
+%ifndef KERNEL_SECTORS
+%define KERNEL_SECTORS 64
+%endif
+
+%define KERNEL_LBA (1 + STAGE2_SECTORS)
+
+start2:
+  cli
+  xor ax, ax
+  mov ds, ax
+  mov es, ax
+  mov ss, ax
+  mov sp, 0x7C00
+  sti
+
+  mov [boot_drive], dl
+
+  mov si, msg_stage2
+  call puts
+
+  call enable_a20
+
+  mov si, msg_loadk
+  call puts
+
+  ; Load kernel to physical 0x00100000 using ES:BX = FFFF:0010
+  ; 0xFFFF0 + 0x0010 = 0x00100000 (requires A20 enabled)
+  mov ax, 0xFFFF
+  mov es, ax
+  mov bx, 0x0010
+
+  ; Prepa  mov si, dap
+  mov word [dap + 2], KERNEL_SECTORS
+  mov word [dap + 4], bx
+  mov word [dap + 6], es
+  mov dword [dap + 8], KERNEL_LBA
+  mov dword [dap + 12], 0
+
+  ; INT 13h extensions read
+  mov dl, [boot_drive]
+  mov ah, 0x42
+  int 0x13
+  jc disk_fail
+
+  mov si, msg_pm
+  call puts
+
+  cli
+  lgdt [gdt_desc]
+
+  ; Enter protected mode
+  mov eax, cr0
+  or eax, 1
+  mov cr0, eax
+  jmp 0x08:pm_entry   ; far jump to flush pipeline
+
+disk_fail:
+  mov si, msg_fail
+  call puts
+  jmp $
+
+; ---- Protected mode (32-bit) ----
+bits 32
+pm_entry:
+  mov ax, 0x10
+  mov ds, ax
+  mov es, ax
+  mov fs, ax
+  mov gs, ax
+  mov ss, ax
+  mov esp, 0x009FC00
+
+  ; Jump to kernel at 0x00100000
+  jmp 0x00100000
+
+; ---- Helpers (back to 16-bit area for data + routines) ----
+bits 16
+
+enable_a20:
+  ; Fast A20 gate (port 0x92)
+  in al, 0x92
+  or al, 0x02
+  and al, 0xFE
+  out 0x92, al
+  ret
+
+puts:
+  pusha
+.next:
+  lodsb
+  test al, al
+  jz .done
+  mov ah, 0x0E
+  mov bh, 0
+  mov bl, 0x07
+  int 0x10
+  jmp .next
+.done:
+  popa
+  ret
+
+boot_drive db 0
+
+msg_stage2 db "Stage2: A20 + load kernel", 0x0D, 0x0A, 0
+msg_loadk  db "Loading kernel to 0x00100000...", 0x0D, 0x0A, 0
+msg_pm     db "Entering protected mode...", 0x0D, 0x0A, 0
+msg_fail   db "Stage2 disk read failed.", 0x0D, 0x0A, 0
+
+; DAP
+dap:
+  db 0x10, 0x00
+  dw 0
+  dw 0
+  dw 0
+  dq 0
+
+; GDT: null, code, data
+gdt_start:
+gdt_null: dq 0x0000000000000000
+gdt_code: dq 0x00CF9A000000FFFF  ; base=0, limit=4GB, code
+gdt_data: dq 0x00CF92000000FFFF  ; base=0, limit=4GB, data
+gdt_end:
+
+gdt_desc:
+  dw gdt_end - gdt_start - 1
+  dd gdt_start
